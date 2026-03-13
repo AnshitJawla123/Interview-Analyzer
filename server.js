@@ -3,9 +3,92 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const OpenAI = require("openai");
+const sqlite3 = require("sqlite3").verbose();
+const session = require("express-session");
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+// Database Setup
+const db = new sqlite3.Database(path.join(__dirname, "database.sqlite"), (err) => {
+  if (err) console.error("Database connection error:", err.message);
+  else console.log("Connected to the SQLite database.");
+});
+
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    password TEXT
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    role_type TEXT,
+    interview_type TEXT,
+    avg_score INTEGER,
+    overall_summary TEXT,
+    questions_data TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  )`);
+});
+
+app.use(express.static(path.join(__dirname, "public")));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(session({
+  secret: "interview-secret",
+  resave: false,
+  saveUninitialized: false,
+  cookie: { secure: false } // Set to true if using HTTPS
+}));
+
+// Auth Routes
+app.post("/api/signup", (req, res) => {
+  const { username, password } = req.body;
+  db.run(`INSERT INTO users (username, password) VALUES (?, ?)`, [username, password], function(err) {
+    if (err) return res.status(400).json({ error: "Username already exists" });
+    req.session.userId = this.lastID;
+    req.session.username = username;
+    res.json({ success: true, username });
+  });
+});
+
+app.post("/api/login", (req, res) => {
+  const { username, password } = req.body;
+  db.get(`SELECT id, username FROM users WHERE username = ? AND password = ?`, [username, password], (err, row) => {
+    if (err || !row) return res.status(401).json({ error: "Invalid credentials" });
+    req.session.userId = row.id;
+    req.session.username = row.username;
+    res.json({ success: true, username: row.username });
+  });
+});
+
+app.get("/api/me", (req, res) => {
+  if (req.session.userId) {
+    res.json({ loggedIn: true, username: req.session.username });
+  } else {
+    res.json({ loggedIn: false });
+  }
+});
+
+app.post("/api/logout", (req, res) => {
+  req.session.destroy();
+  res.json({ success: true });
+});
+
+// History Route
+app.get("/api/history", (req, res) => {
+  if (!req.session.userId) return res.status(401).json({ error: "Unauthorized" });
+  db.all(`SELECT * FROM results WHERE user_id = ? ORDER BY created_at DESC`, [req.session.userId], (err, rows) => {
+    if (err) return res.status(500).json({ error: "Failed to fetch history" });
+    res.json(rows.map(row => ({
+      ...row,
+      questions: JSON.parse(row.questions_data)
+    })));
+  });
+});
 
 let cachedClient = null;
 
@@ -320,44 +403,130 @@ async function transcribeFile(filePath) {
   }
 }
 
-app.post("/api/analyze", upload.array("clips"), async (req, res) => {
+function segmentTranscript(transcript, questionsList) {
+  // If user provided a list of questions, we try to split by those questions.
+  // Otherwise, we split by generic sentence boundaries or long pauses.
+  const questions = questionsList ? questionsList.split("\n").map(q => q.trim()).filter(Boolean) : [];
+  
+  if (questions.length > 0) {
+    // Advanced: In a real app, you'd use an LLM or fuzzy matching to find where these questions are answered.
+    // For now, we simulate segmentation by dividing the transcript into equal parts based on the number of questions.
+    const segments = [];
+    const sentences = transcript.split(/[.!?]+/).map(s => s.trim()).filter(Boolean);
+    const chunkSize = Math.ceil(sentences.length / questions.length);
+    
+    for (let i = 0; i < questions.length; i++) {
+      const start = i * chunkSize;
+      const end = Math.min((i + 1) * chunkSize, sentences.length);
+      segments.push({
+        questionText: questions[i],
+        transcript: sentences.slice(start, end).join(". ") + "."
+      });
+    }
+    return segments;
+  } else {
+    // Auto-segmentation: split by "interviewer-like" triggers or just break into 2-3 logical chunks
+    const sentences = transcript.split(/[.!?]+/).map(s => s.trim()).filter(Boolean);
+    const mid = Math.floor(sentences.length / 2);
+    
+    return [
+      { questionText: "Introduction / Opening", transcript: sentences.slice(0, mid).join(". ") + "." },
+      { questionText: "Main Discussion / Closing", transcript: sentences.slice(mid).join(". ") + "." }
+    ];
+  }
+}
+
+function highlightTranscript(transcript) {
+  let highlighted = transcript;
+  
+  const fillerWords = ["um", "uh", "like", "you know", "actually", "basically", "so", "well"];
+  fillerWords.forEach(word => {
+    const regex = new RegExp(`\\b${word}\\b`, 'gi');
+    highlighted = highlighted.replace(regex, `<span style="background: #ef4444; color: white; padding: 2px 4px; border-radius: 3px;">$&</span>`);
+  });
+
+  const weakPhrases = ["i think", "i guess", "maybe", "sort of", "kind of"];
+  weakPhrases.forEach(phrase => {
+    const regex = new RegExp(`\\b${phrase}\\b`, 'gi');
+    highlighted = highlighted.replace(regex, `<span style="background: #f97316; color: white; padding: 2px 4px; border-radius: 3px;">$&</span>`);
+  });
+
+  const strongPhrases = ["i achieved", "i led", "i managed", "i developed", "i created", "the result was"];
+  strongPhrases.forEach(phrase => {
+    const regex = new RegExp(`\\b${phrase}\\b`, 'gi');
+    highlighted = highlighted.replace(regex, `<span style="background: #10b981; color: white; padding: 2px 4px; border-radius: 3px;">$&</span>`);
+  });
+
+  return highlighted;
+}
+
+function generateExampleAnswer(questionText, jobDescription) {
+  const jdKeywords = jobDescription ? jobDescription.split(/\s+/).slice(0, 5).join(", ") : "relevant skills";
+  return `Situation: In my previous role, we faced a challenge with ${jdKeywords}. \nTask: My responsibility was to resolve this and ensure team success. \nAction: I led the initiative, coordinated with stakeholders, and implemented a new workflow. \nResult: As a result, we improved efficiency by 25% and met all project deadlines.`;
+}
+
+function generatePracticeGoals(allQuestions) {
+  const avgScores = {
+    content: Math.round(allQuestions.reduce((a, q) => a + q.scoring.categoryScores.content, 0) / allQuestions.length),
+    communication: Math.round(allQuestions.reduce((a, q) => a + q.scoring.categoryScores.communication, 0) / allQuestions.length),
+    nonVerbal: Math.round(allQuestions.reduce((a, q) => a + q.scoring.categoryScores.nonVerbal, 0) / allQuestions.length)
+  };
+
+  const goals = [];
+  if (avgScores.content < 80) goals.push("Structure your answers more clearly using the STAR method (especially the Result).");
+  if (avgScores.communication < 80) goals.push("Reduce filler words like 'um' and 'like' by embracing short pauses.");
+  if (avgScores.nonVerbal < 80) goals.push("Improve your delivery by maintaining steady eye contact and higher energy.");
+  
+  if (goals.length === 0) goals.push("Keep refining your delivery and try more complex behavioral scenarios.");
+  
+  return goals;
+}
+
+app.post("/api/analyze", upload.single("video"), async (req, res) => {
   try {
+    console.log("Analyze request received:", req.body.roleType);
     const roleType = req.body.roleType || "";
     const interviewType = req.body.interviewType || "";
     const jobDescription = req.body.jobDescription || "";
-    const questionTexts = req.body.questionText || [];
+    const questionsList = req.body.questionsList || "";
 
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ error: "At least one video/audio file is required" });
+    if (!req.file) {
+      console.log("No file uploaded");
+      return res.status(400).json({ error: "Video file is required" });
     }
 
+    console.log("Transcribing file:", req.file.path);
+    const transcription = await transcribeFile(req.file.path);
+    console.log("Transcription complete, segmenting...");
+    
+    const segments = segmentTranscript(transcription.transcript, questionsList);
+    console.log(`Found ${segments.length} segments`);
+    
     const questionResults = [];
     let totalWordCount = 0;
     let totalFillers = 0;
 
-    for (let i = 0; i < req.files.length; i++) {
-      const file = req.files[i];
-      const qText = Array.isArray(questionTexts) ? questionTexts[i] : questionTexts;
-      
-      const transcription = await transcribeFile(file.path);
-      const analysis = analyzeTranscript(transcription.transcript, jobDescription, transcription.durationSeconds, roleType);
+    for (const segment of segments) {
+      const analysis = analyzeTranscript(segment.transcript, jobDescription, transcription.durationSeconds / segments.length, roleType);
       
       totalWordCount += analysis.metrics.wordCount;
       totalFillers += analysis.metrics.fillerTotal;
 
       questionResults.push({
-        questionText: qText,
-        transcript: transcription.transcript,
-        durationSeconds: transcription.durationSeconds,
+        questionText: segment.questionText,
+        transcript: segment.transcript,
+        highlightedTranscript: highlightTranscript(segment.transcript),
+        exampleAnswer: generateExampleAnswer(segment.questionText, jobDescription),
+        durationSeconds: transcription.durationSeconds / segments.length,
         analysis: analysis,
         starAnalysis: analysis.starAnalysis,
         scoring: analysis.scoring
       });
     }
 
-    // Calculate overall session score
-    const avgScore = Math.round(questionResults.reduce((acc, q) => acc + q.scoring.totalScore, 0) / req.files.length);
-    const overallSummary = `Analysis complete for ${req.files.length} clips. Overall Readiness: ${avgScore}/100. Total words: ${totalWordCount}. Average filler words: ${Math.round(totalFillers / req.files.length)}.`;
+    const avgScore = Math.round(questionResults.reduce((acc, q) => acc + q.scoring.totalScore, 0) / questionResults.length);
+    const practiceGoals = generatePracticeGoals(questionResults);
+    const overallSummary = `Analysis complete. Overall Readiness: ${avgScore}/100. ${practiceGoals[0]}`;
 
     const result = {
       roleType,
@@ -365,13 +534,26 @@ app.post("/api/analyze", upload.array("clips"), async (req, res) => {
       jobDescription,
       questions: questionResults,
       overallSummary,
-      avgScore
+      avgScore,
+      practiceGoals
     };
+
+    // Save to DB if user is logged in
+    if (req.session.userId) {
+      console.log("Saving results to database for user:", req.session.userId);
+      db.run(`INSERT INTO results (user_id, role_type, interview_type, avg_score, overall_summary, questions_data) 
+        VALUES (?, ?, ?, ?, ?, ?)`, 
+        [req.session.userId, roleType, interviewType, avgScore, overallSummary, JSON.stringify(questionResults)],
+        (err) => {
+          if (err) console.error("Failed to save result:", err.message);
+        }
+      );
+    }
 
     res.json(result);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Failed to analyze interview clips" });
+    console.error("Analysis Error:", error);
+    res.status(500).json({ error: "Failed to analyze interview" });
   }
 });
 
