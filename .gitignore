@@ -3,3 +3,4 @@ uploads/
 *.sqlite
 *.mp4
 .DS_Store
+.env

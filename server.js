@@ -5,6 +5,8 @@ const fs = require("fs");
 const OpenAI = require("openai");
 const sqlite3 = require("sqlite3").verbose();
 const session = require("express-session");
+const bcrypt = require("bcrypt");
+require("dotenv").config();
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -45,20 +47,29 @@ app.use(session({
 }));
 
 // Auth Routes
-app.post("/api/signup", (req, res) => {
+app.post("/api/signup", async (req, res) => {
   const { username, password } = req.body;
-  db.run(`INSERT INTO users (username, password) VALUES (?, ?)`, [username, password], function(err) {
-    if (err) return res.status(400).json({ error: "Username already exists" });
-    req.session.userId = this.lastID;
-    req.session.username = username;
-    res.json({ success: true, username });
-  });
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    db.run(`INSERT INTO users (username, password) VALUES (?, ?)`, [username, hashedPassword], function(err) {
+      if (err) return res.status(400).json({ error: "Username already exists" });
+      req.session.userId = this.lastID;
+      req.session.username = username;
+      res.json({ success: true, username });
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Signup failed" });
+  }
 });
 
 app.post("/api/login", (req, res) => {
   const { username, password } = req.body;
-  db.get(`SELECT id, username FROM users WHERE username = ? AND password = ?`, [username, password], (err, row) => {
+  db.get(`SELECT id, username, password FROM users WHERE username = ?`, [username], async (err, row) => {
     if (err || !row) return res.status(401).json({ error: "Invalid credentials" });
+    
+    const isMatch = await bcrypt.compare(password, row.password);
+    if (!isMatch) return res.status(401).json({ error: "Invalid credentials" });
+
     req.session.userId = row.id;
     req.session.username = row.username;
     res.json({ success: true, username: row.username });
@@ -243,11 +254,72 @@ function calculateReadinessScore(analysis, roleType) {
   };
 }
 
-function analyzeTranscript(transcript, jobDescription, durationSeconds, roleType) {
+async function analyzeTranscriptWithLLM(transcript, jobDescription, roleType, interviewType, questionText) {
+  const client = getOpenAIClient();
+  if (!client) return null;
+
+  const prompt = `
+    Analyze the following interview transcript segment.
+    Question Asked: ${questionText || "Not specified (assume it was an introductory or general question)"}
+    Role: ${roleType}
+    Interview Type: ${interviewType}
+    Job Description context: ${jobDescription}
+
+    Transcript: "${transcript}"
+
+    Provide a detailed analysis in JSON format with the following structure:
+    {
+      "starAnalysis": {
+        "situation": { "detected": boolean, "feedback": "string" },
+        "task": { "detected": boolean, "feedback": "string" },
+        "action": { "detected": boolean, "feedback": "string" },
+        "result": { "detected": boolean, "feedback": "string" }
+      },
+      "technicalAnalysis": {
+        "conceptsCovered": ["string"],
+        "accuracyFeedback": "string",
+        "relevanceScore": number (0-100),
+        "relevanceFeedback": "string",
+        "depthScore": number (0-100),
+        "missingConcepts": ["string"],
+        "architectureFeedback": "string"
+      },
+      "communicationFeedback": {
+        "clarity": "string",
+        "confidence": "string",
+        "impactfulPhrases": ["string"]
+      },
+      "rewrites": [
+        { "original": "string", "improved": "string", "reason": "string" }
+      ],
+      "overallScore": number (0-100)
+    }
+
+    Special Instructions for Technical rounds:
+    - If the user dodges the question or gives an unrelated technical answer, give a low relevanceScore (<40).
+    - Look for mention of trade-offs, edge cases, and performance considerations.
+    - If the explanation is technically shallow, give a low depthScore.
+  `;
+
+  try {
+    const response = await client.chat.completions.create({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: prompt }],
+      response_format: { type: "json_object" }
+    });
+    return JSON.parse(response.choices[0].message.content);
+  } catch (error) {
+    console.error("LLM Analysis Error:", error);
+    return null;
+  }
+}
+
+async function analyzeTranscript(transcript, jobDescription, durationSeconds, roleType, interviewType, questionText, nonVerbalData) {
   const text = transcript.toLowerCase();
   const tokens = text.split(/\s+/).filter(Boolean);
   const wordCount = tokens.length;
 
+  // Heuristic Analysis (Fallback)
   const fillerWords = ["um", "uh", "like", "you know", "actually", "basically", "so", "well"];
   const fillerCounts = {};
   let fillerTotal = 0;
@@ -286,74 +358,71 @@ function analyzeTranscript(transcript, jobDescription, durationSeconds, roleType
     matchedKeywords
   };
 
+  // LLM-Powered Deep Analysis
+  const llmAnalysis = await analyzeTranscriptWithLLM(transcript, jobDescription, roleType, interviewType, questionText);
+
   const suggestions = [];
 
-  if (fillerTotal > wordCount * 0.03) {
-    suggestions.push("Reduce filler words by pausing briefly instead of saying um or like.");
-  }
-
-  if (speechRatePerMinute !== null) {
-    if (speechRatePerMinute < 100) {
-      suggestions.push("Speak a little faster to sound more confident and engaged.");
-    } else if (speechRatePerMinute > 170) {
-      suggestions.push("Slow down slightly so the interviewer can follow your answers.");
+  if (llmAnalysis) {
+    // Use LLM insights if available
+    if (llmAnalysis.communicationFeedback.clarity) suggestions.push(llmAnalysis.communicationFeedback.clarity);
+    if (llmAnalysis.technicalAnalysis.accuracyFeedback) suggestions.push(llmAnalysis.technicalAnalysis.accuracyFeedback);
+    if (llmAnalysis.technicalAnalysis.relevanceFeedback) suggestions.push(`Relevance: ${llmAnalysis.technicalAnalysis.relevanceFeedback}`);
+    if (llmAnalysis.technicalAnalysis.missingConcepts && llmAnalysis.technicalAnalysis.missingConcepts.length > 0) {
+      suggestions.push(`Missing Depth: You could have also mentioned ${llmAnalysis.technicalAnalysis.missingConcepts.join(", ")}.`);
+    }
+    if (llmAnalysis.technicalAnalysis.architectureFeedback) suggestions.push(`Architecture: ${llmAnalysis.technicalAnalysis.architectureFeedback}`);
+    
+    const missingStar = Object.keys(llmAnalysis.starAnalysis).filter(k => !llmAnalysis.starAnalysis[k].detected);
+    if (missingStar.length > 0) {
+      suggestions.push(`LLM Insight: Your STAR structure could be improved. You seem to be missing or have a weak ${missingStar.join(", ")}.`);
+    }
+  } else {
+    // Fallback to heuristics
+    if (fillerTotal > wordCount * 0.03) {
+      suggestions.push("Reduce filler words by pausing briefly instead of saying um or like.");
+    }
+    if (speechRatePerMinute !== null) {
+      if (speechRatePerMinute < 100) suggestions.push("Speak a little faster to sound more confident.");
+      else if (speechRatePerMinute > 170) suggestions.push("Slow down slightly so the interviewer can follow.");
+    }
+    const star = analyzeSTAR(transcript);
+    const missingStar = Object.keys(star).filter(k => !star[k]);
+    if (missingStar.length > 0) {
+      suggestions.push(`Try to follow the STAR method more closely. Missing: ${missingStar.join(", ")}.`);
     }
   }
 
-  if (shortSentenceCount > sentences.length * 0.5) {
-    suggestions.push("Extend your answers with more detail and concrete examples.");
-  }
-
-  if (keywordCoverage !== null && keywordCoverage < 40) {
-    suggestions.push("Mention more skills and keywords from the job description in your answers.");
-  }
-
-  const star = analyzeSTAR(transcript);
-  const missingStar = Object.keys(star).filter(k => !star[k]);
-  if (missingStar.length > 0) {
-    suggestions.push(`Try to follow the STAR method more closely. You seem to be missing: ${missingStar.join(", ")}.`);
-  }
-
-  const nonVerbal = analyzeNonVerbal(transcript, durationSeconds, metrics);
+  const nonVerbal = nonVerbalData || analyzeNonVerbal(transcript, durationSeconds, metrics);
   
-  if (nonVerbal.eyeContact < 60) {
-    suggestions.push("Maintain more consistent eye contact with the camera.");
-  }
-  if (nonVerbal.energy < 40) {
-    suggestions.push("Try to bring more energy and enthusiasm into your delivery.");
-  }
-
-  if (suggestions.length === 0) {
-    suggestions.push("Your answers are generally well structured. Focus on refining specific stories for key skills.");
-  }
-
   const summaryParts = [];
-
   summaryParts.push(`The answer contains ${wordCount} words.`);
-
-  if (speechRatePerMinute !== null) {
-    summaryParts.push(`Your pace is ${speechRatePerMinute} wpm.`);
-  }
-
-  if (fillerTotal > 0) {
-    summaryParts.push(`${fillerTotal} filler words used.`);
-  }
-
-  if (keywordCoverage !== null) {
-    summaryParts.push(`${keywordCoverage}% JD keyword match.`);
-  }
-
+  if (speechRatePerMinute !== null) summaryParts.push(`Your pace is ${speechRatePerMinute} wpm.`);
+  if (fillerTotal > 0) summaryParts.push(`${fillerTotal} filler words used.`);
+  
   const summary = summaryParts.join(" ");
 
   const analysis = {
     metrics,
     summary,
     suggestions,
-    starAnalysis: star,
-    nonVerbal
+    starAnalysis: llmAnalysis ? {
+      situation: llmAnalysis.starAnalysis.situation.detected,
+      task: llmAnalysis.starAnalysis.task.detected,
+      action: llmAnalysis.starAnalysis.action.detected,
+      result: llmAnalysis.starAnalysis.result.detected
+    } : analyzeSTAR(transcript),
+    nonVerbal,
+    llmDeepDive: llmAnalysis
   };
 
   const scoring = calculateReadinessScore(analysis, roleType);
+  if (llmAnalysis) {
+    // Blend LLM score into readiness score
+    // Weighting relevance heavily if it's low
+    const relevancePenalty = llmAnalysis.technicalAnalysis.relevanceScore < 50 ? 0.5 : 1.0;
+    scoring.totalScore = Math.round(((scoring.totalScore * 0.4) + (llmAnalysis.overallScore * 0.6)) * relevancePenalty);
+  }
 
   return {
     ...analysis,
@@ -489,6 +558,7 @@ app.post("/api/analyze", upload.single("video"), async (req, res) => {
     const interviewType = req.body.interviewType || "";
     const jobDescription = req.body.jobDescription || "";
     const questionsList = req.body.questionsList || "";
+    const nonVerbalData = req.body.nonVerbalData ? JSON.parse(req.body.nonVerbalData) : null;
 
     if (!req.file) {
       console.log("No file uploaded");
@@ -507,7 +577,7 @@ app.post("/api/analyze", upload.single("video"), async (req, res) => {
     let totalFillers = 0;
 
     for (const segment of segments) {
-      const analysis = analyzeTranscript(segment.transcript, jobDescription, transcription.durationSeconds / segments.length, roleType);
+      const analysis = await analyzeTranscript(segment.transcript, jobDescription, transcription.durationSeconds / segments.length, roleType, interviewType, segment.questionText, nonVerbalData);
       
       totalWordCount += analysis.metrics.wordCount;
       totalFillers += analysis.metrics.fillerTotal;
@@ -520,7 +590,8 @@ app.post("/api/analyze", upload.single("video"), async (req, res) => {
         durationSeconds: transcription.durationSeconds / segments.length,
         analysis: analysis,
         starAnalysis: analysis.starAnalysis,
-        scoring: analysis.scoring
+        scoring: analysis.scoring,
+        llmDeepDive: analysis.llmDeepDive
       });
     }
 
