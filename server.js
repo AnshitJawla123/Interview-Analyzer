@@ -6,6 +6,7 @@ const OpenAI = require("openai");
 const sqlite3 = require("sqlite3").verbose();
 const session = require("express-session");
 const bcrypt = require("bcrypt");
+const pdf = require("pdf-parse");
 require("dotenv").config();
 
 const app = express();
@@ -137,7 +138,13 @@ const upload = multer({
     fileSize: 1024 * 1024 * 500
   },
   fileFilter: function (req, file, cb) {
-    if (!file.mimetype.startsWith("video/") && !file.mimetype.startsWith("audio/")) {
+    if (file.fieldname === "resume") {
+      if (file.mimetype === "application/pdf") {
+        cb(null, true);
+      } else {
+        cb(new Error("Only PDF files are allowed for resumes"));
+      }
+    } else if (!file.mimetype.startsWith("video/") && !file.mimetype.startsWith("audio/")) {
       cb(new Error("Only video or audio files are allowed"));
     } else {
       cb(null, true);
@@ -254,9 +261,14 @@ function calculateReadinessScore(analysis, roleType) {
   };
 }
 
-async function analyzeTranscriptWithLLM(transcript, jobDescription, roleType, interviewType, questionText) {
+async function analyzeTranscriptWithLLM(transcript, jobDescription, roleType, interviewType, questionText, resumeText) {
   const client = getOpenAIClient();
   if (!client) return null;
+
+  // Hybrid Model Routing:
+  // - Use gpt-4o for complex Technical rounds where deep logic is needed.
+  // - Use gpt-4o-mini for Behavioral/HR rounds to save 90% cost and improve speed.
+  const model = interviewType === "technical" ? "gpt-4o" : "gpt-4o-mini";
 
   const prompt = `
     Analyze the following interview transcript segment.
@@ -264,6 +276,7 @@ async function analyzeTranscriptWithLLM(transcript, jobDescription, roleType, in
     Role: ${roleType}
     Interview Type: ${interviewType}
     Job Description context: ${jobDescription}
+    Candidate Resume context: ${resumeText || "Not provided"}
 
     Transcript: "${transcript}"
 
@@ -292,10 +305,15 @@ async function analyzeTranscriptWithLLM(transcript, jobDescription, roleType, in
       "rewrites": [
         { "original": "string", "improved": "string", "reason": "string" }
       ],
-      "overallScore": number (0-100)
+      "overallScore": number (0-100),
+      "resumeAlignment": {
+        "score": number (0-100),
+        "feedback": "string"
+      }
     }
 
-    Special Instructions for Technical rounds:
+    Special Instructions:
+    - If a resume is provided, check if the answer aligns with the candidate's stated experience. Flag discrepancies.
     - If the user dodges the question or gives an unrelated technical answer, give a low relevanceScore (<40).
     - Look for mention of trade-offs, edge cases, and performance considerations.
     - If the explanation is technically shallow, give a low depthScore.
@@ -303,7 +321,7 @@ async function analyzeTranscriptWithLLM(transcript, jobDescription, roleType, in
 
   try {
     const response = await client.chat.completions.create({
-      model: "gpt-4o",
+      model: model,
       messages: [{ role: "user", content: prompt }],
       response_format: { type: "json_object" }
     });
@@ -314,7 +332,7 @@ async function analyzeTranscriptWithLLM(transcript, jobDescription, roleType, in
   }
 }
 
-async function analyzeTranscript(transcript, jobDescription, durationSeconds, roleType, interviewType, questionText, nonVerbalData) {
+async function analyzeTranscript(transcript, jobDescription, durationSeconds, roleType, interviewType, questionText, nonVerbalData, resumeText) {
   const text = transcript.toLowerCase();
   const tokens = text.split(/\s+/).filter(Boolean);
   const wordCount = tokens.length;
@@ -359,7 +377,7 @@ async function analyzeTranscript(transcript, jobDescription, durationSeconds, ro
   };
 
   // LLM-Powered Deep Analysis
-  const llmAnalysis = await analyzeTranscriptWithLLM(transcript, jobDescription, roleType, interviewType, questionText);
+  const llmAnalysis = await analyzeTranscriptWithLLM(transcript, jobDescription, roleType, interviewType, questionText, resumeText);
 
   const suggestions = [];
 
@@ -372,6 +390,9 @@ async function analyzeTranscript(transcript, jobDescription, durationSeconds, ro
       suggestions.push(`Missing Depth: You could have also mentioned ${llmAnalysis.technicalAnalysis.missingConcepts.join(", ")}.`);
     }
     if (llmAnalysis.technicalAnalysis.architectureFeedback) suggestions.push(`Architecture: ${llmAnalysis.technicalAnalysis.architectureFeedback}`);
+    if (llmAnalysis.resumeAlignment && llmAnalysis.resumeAlignment.feedback) {
+      suggestions.push(`Resume Context: ${llmAnalysis.resumeAlignment.feedback}`);
+    }
     
     const missingStar = Object.keys(llmAnalysis.starAnalysis).filter(k => !llmAnalysis.starAnalysis[k].detected);
     if (missingStar.length > 0) {
@@ -551,7 +572,7 @@ function generatePracticeGoals(allQuestions) {
   return goals;
 }
 
-app.post("/api/analyze", upload.single("video"), async (req, res) => {
+app.post("/api/analyze", upload.fields([{ name: "video", maxCount: 1 }, { name: "resume", maxCount: 1 }]), async (req, res) => {
   try {
     console.log("Analyze request received:", req.body.roleType);
     const roleType = req.body.roleType || "";
@@ -560,13 +581,24 @@ app.post("/api/analyze", upload.single("video"), async (req, res) => {
     const questionsList = req.body.questionsList || "";
     const nonVerbalData = req.body.nonVerbalData ? JSON.parse(req.body.nonVerbalData) : null;
 
-    if (!req.file) {
-      console.log("No file uploaded");
+    const videoFile = req.files["video"] ? req.files["video"][0] : null;
+    const resumeFile = req.files["resume"] ? req.files["resume"][0] : null;
+
+    if (!videoFile) {
+      console.log("No video file uploaded");
       return res.status(400).json({ error: "Video file is required" });
     }
 
-    console.log("Transcribing file:", req.file.path);
-    const transcription = await transcribeFile(req.file.path);
+    let resumeText = "";
+    if (resumeFile) {
+      console.log("Parsing resume:", resumeFile.path);
+      const dataBuffer = fs.readFileSync(resumeFile.path);
+      const data = await pdf(dataBuffer);
+      resumeText = data.text;
+    }
+
+    console.log("Transcribing file:", videoFile.path);
+    const transcription = await transcribeFile(videoFile.path);
     console.log("Transcription complete, segmenting...");
     
     const segments = segmentTranscript(transcription.transcript, questionsList);
@@ -577,7 +609,7 @@ app.post("/api/analyze", upload.single("video"), async (req, res) => {
     let totalFillers = 0;
 
     for (const segment of segments) {
-      const analysis = await analyzeTranscript(segment.transcript, jobDescription, transcription.durationSeconds / segments.length, roleType, interviewType, segment.questionText, nonVerbalData);
+      const analysis = await analyzeTranscript(segment.transcript, jobDescription, transcription.durationSeconds / segments.length, roleType, interviewType, segment.questionText, nonVerbalData, resumeText);
       
       totalWordCount += analysis.metrics.wordCount;
       totalFillers += analysis.metrics.fillerTotal;
