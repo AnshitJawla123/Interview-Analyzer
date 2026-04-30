@@ -365,6 +365,7 @@
     .star-t { background: #8b5cf6; box-shadow: 0 0 15px rgba(139, 92, 246, 0.4); }
     .star-a { background: #ec4899; box-shadow: 0 0 15px rgba(236, 72, 153, 0.4); }
     .star-r { background: #10b981; box-shadow: 0 0 15px rgba(16, 185, 129, 0.4); }
+    .star-l { background: #f59e0b; box-shadow: 0 0 15px rgba(245, 158, 11, 0.4); }
     .star-missing { background: #334155; opacity: 0.2; }
 
     .transcript-box {
@@ -469,6 +470,78 @@
       border: 1px solid rgba(59, 130, 246, 0.2);
       backdrop-filter: blur(8px);
     }
+
+    /* Progress Bar Styling */
+    .progress-container {
+      width: 100%;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 999px;
+      height: 8px;
+      margin: 20px 0;
+      overflow: hidden;
+      display: none;
+      border: 1px solid var(--border);
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--primary), #a855f7);
+      width: 0%;
+      transition: width 0.3s ease;
+      box-shadow: 0 0 10px var(--primary);
+    }
+
+    .progress-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+      display: none;
+    }
+
+    /* Prep Tips Styling */
+    .tips-card {
+      background: rgba(59, 130, 246, 0.05);
+      border: 1px solid rgba(59, 130, 246, 0.2);
+      border-radius: 20px;
+      padding: 24px;
+      margin-top: 40px;
+      display: flex;
+      gap: 20px;
+      align-items: flex-start;
+      animation: fadeIn 0.5s ease;
+    }
+
+    .tips-icon {
+      background: var(--primary);
+      color: white;
+      padding: 12px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+    }
+
+    .tips-content h4 {
+      margin: 0 0 8px 0;
+      color: var(--primary);
+      font-size: 1.1rem;
+      font-weight: 700;
+    }
+
+    .tips-content p {
+      margin: 0;
+      color: #cbd5e1;
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
   </style>
 </head>
 <body>
@@ -557,6 +630,16 @@
             <i data-lucide="arrow-right"></i>
           </button>
           
+          <div id="upload-progress-wrapper" style="width: 100%; max-width: 400px;">
+            <div id="progress-label" class="progress-label">
+              <span>Uploading recording...</span>
+              <span id="progress-percent">0%</span>
+            </div>
+            <div id="progress-container" class="progress-container">
+              <div id="progress-fill" class="progress-fill"></div>
+            </div>
+          </div>
+          
           <div id="loading-stepper" class="loading-container glass-card" style="width: 100%; max-width: 400px; padding: 24px;">
             <div class="stepper">
               <div id="step-1" class="step">
@@ -583,7 +666,20 @@
           </div>
           
           <div id="status" class="status"></div>
+
+        <!-- Pro Tips Section -->
+        <div id="prep-tips-container">
+          <div class="tips-card">
+            <div class="tips-icon">
+              <i data-lucide="lightbulb"></i>
+            </div>
+            <div class="tips-content">
+              <h4 id="tip-title">Pro Tip: The STAR Method</h4>
+              <p id="tip-text">Always structure behavioral answers using Situation, Task, Action, and Result. It helps interviewers follow your logic clearly.</p>
+            </div>
+          </div>
         </div>
+      </form>  </div>
       </form>
 
       <div id="results" class="results" style="display: none; margin-top: 48px;">
@@ -762,6 +858,35 @@
     const fileInput = document.getElementById("video");
     const fileNameDisplay = document.getElementById("selected-file-name");
     const loadingStepper = document.getElementById("loading-stepper");
+    const progressContainer = document.getElementById("progress-container");
+    const progressFill = document.getElementById("progress-fill");
+    const progressLabel = document.getElementById("progress-label");
+    const progressPercent = document.getElementById("progress-percent");
+
+    const tipsTitle = document.getElementById("tip-title");
+    const tipsText = document.getElementById("tip-text");
+
+    const interviewTips = [
+      { title: "Pro Tip: The STAR Method", text: "Always structure behavioral answers using Situation, Task, Action, and Result. It helps interviewers follow your logic clearly." },
+      { title: "Pro Tip: Eye Contact", text: "Maintain steady eye contact with the camera. It conveys confidence and helps build a connection with the interviewer." },
+      { title: "Pro Tip: Filler Words", text: "Practice pausing instead of using 'um' or 'like'. Brief silences actually make you sound more thoughtful and composed." },
+      { title: "Pro Tip: Research the Role", text: "Tailor your technical examples to the specific skills mentioned in the job description. Relevance is key." },
+      { title: "Pro Tip: Body Language", text: "Sit up straight and use hand gestures naturally. Open body language signals energy and engagement." },
+      { title: "Pro Tip: Asking Questions", text: "Always have 2-3 thoughtful questions ready for the interviewer. It shows you're genuinely interested in the company." }
+    ];
+
+    let tipIndex = 0;
+    setInterval(() => {
+      tipIndex = (tipIndex + 1) % interviewTips.length;
+      const container = document.querySelector('.tips-card');
+      container.style.opacity = '0';
+      setTimeout(() => {
+        tipsTitle.textContent = interviewTips[tipIndex].title;
+        tipsText.textContent = interviewTips[tipIndex].text;
+        container.style.opacity = '1';
+        lucide.createIcons();
+      }, 500);
+    }, 8000);
 
     const userInfo = document.getElementById("user-info");
     const currentUsernameEl = document.getElementById("current-username");
@@ -921,14 +1046,12 @@
         
         // Start Step 1
         updateStep(1, 'active');
-        
-        // Simulate step progression for better UX (actual steps are server-side but we show intent)
-        setTimeout(() => updateStep(1, 'completed'), 10000);
-        setTimeout(() => updateStep(2, 'active'), 10000);
       } else {
         button.disabled = false;
         buttonLabel.textContent = "Start Deep Analysis";
         loadingStepper.style.display = "none";
+        progressContainer.style.display = "none";
+        progressLabel.style.display = "none";
       }
     }
 
@@ -1002,7 +1125,8 @@
             <span class="star-badge ${q.starAnalysis.task ? 'star-t' : 'star-missing'}">T</span>
             <span class="star-badge ${q.starAnalysis.action ? 'star-a' : 'star-missing'}">A</span>
             <span class="star-badge ${q.starAnalysis.result ? 'star-r' : 'star-missing'}">R</span>
-            <span style="font-size: 0.85rem; color: var(--text-muted); margin-left: 8px; font-weight: 500;">Behavioral Structure (STAR)</span>
+            <span class="star-badge ${q.starAnalysis.learning ? 'star-l' : 'star-missing'}">L</span>
+            <span style="font-size: 0.85rem; color: var(--text-muted); margin-left: 8px; font-weight: 500;">Behavioral Structure (STAR-L)</span>
           </div>
         ` : '';
 
@@ -1204,17 +1328,46 @@
           }
         }
 
-        const response = await fetch("/api/analyze", {
-          method: "POST",
-          body: formData
+        // Use XMLHttpRequest for upload progress tracking
+        const xhr = new XMLHttpRequest();
+        
+        const responseData = await new Promise((resolve, reject) => {
+          xhr.open("POST", "/api/analyze");
+          
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              const percent = Math.round((e.loaded / e.total) * 100);
+              progressContainer.style.display = "block";
+              progressLabel.style.display = "flex";
+              progressFill.style.width = percent + "%";
+              progressPercent.textContent = percent + "%";
+              
+              if (percent === 100) {
+                progressLabel.querySelector('span').textContent = "Upload complete! AI is processing...";
+                updateStep(1, 'completed');
+                updateStep(2, 'active');
+              }
+            }
+          };
+
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve(JSON.parse(xhr.responseText));
+            } else {
+              try {
+                const errorData = JSON.parse(xhr.responseText);
+                reject(new Error(errorData.error || "Failed to analyze interview"));
+              } catch (e) {
+                reject(new Error("Failed to analyze interview"));
+              }
+            }
+          };
+
+          xhr.onerror = () => reject(new Error("Network error during upload"));
+          xhr.send(formData);
         });
 
-        if (!response.ok) {
-          const data = await response.json().catch(() => null);
-          throw new Error((data && data.error) || "Failed to analyze interview");
-        }
-
-        const data = await response.json();
+        const data = responseData;
         
         // Progress Stepper Completion
         updateStep(3, 'completed');
