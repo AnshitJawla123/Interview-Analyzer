@@ -473,7 +473,7 @@
 </head>
 <body>
   <div class="container">
-    <div id="user-info" class="user-info" style="display: none; justify-content: space-between; align-items: center; margin-bottom: 40px;">
+    <div id="user-info" class="user-info" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 40px;">
       <div style="font-weight: 500; display: flex; align-items: center; gap: 8px;">
         <i data-lucide="user" style="width: 18px; height: 18px; color: var(--primary);"></i>
         <span>Welcome back, <strong id="current-username" style="color: var(--primary);"></strong></span>
@@ -482,28 +482,6 @@
         <i data-lucide="log-out" style="width: 14px; height: 14px;"></i>
         Logout
       </button>
-    </div>
-
-    <div id="auth-container" class="glass-card auth-container" style="display: none; max-width: 450px; margin: 0 auto 48px;">
-      <div class="auth-tabs" style="display: flex; gap: 24px; margin-bottom: 32px; border-bottom: 1px solid var(--border);">
-        <div id="tab-login" class="auth-tab active" onclick="setAuthTab('login')" style="padding-bottom: 12px; cursor: pointer; font-weight: 700; transition: all 0.2s;">Login</div>
-        <div id="tab-signup" class="auth-tab" onclick="setAuthTab('signup')" style="padding-bottom: 12px; cursor: pointer; font-weight: 700; transition: all 0.2s; color: var(--text-muted);">Sign Up</div>
-      </div>
-      <form id="auth-form" style="background: transparent; border: none; padding: 0; margin: 0;">
-        <div class="field">
-          <label><i data-lucide="user"></i> Username</label>
-          <input type="text" id="auth-username" required placeholder="Your unique handle">
-        </div>
-        <div class="field" style="margin-top: 20px;">
-          <label><i data-lucide="lock"></i> Password</label>
-          <input type="password" id="auth-password" required placeholder="••••••••">
-        </div>
-        <button type="submit" style="width: 100%; margin-top: 32px; justify-content: center;" id="auth-submit">
-          <i data-lucide="log-in"></i>
-          Login
-        </button>
-        <div id="auth-status" class="status" style="text-align: center; margin-top: 16px;"></div>
-      </form>
     </div>
 
     <header>
@@ -785,15 +763,10 @@
     const fileNameDisplay = document.getElementById("selected-file-name");
     const loadingStepper = document.getElementById("loading-stepper");
 
-    const authContainer = document.getElementById("auth-container");
-    const authForm = document.getElementById("auth-form");
     const userInfo = document.getElementById("user-info");
     const currentUsernameEl = document.getElementById("current-username");
-    const authStatus = document.getElementById("auth-status");
-    const authSubmit = document.getElementById("auth-submit");
     const historyList = document.getElementById("history-list");
     
-    let currentAuthTab = 'login';
     let isLoggedIn = false;
     let categoryChart = null;
 
@@ -843,66 +816,29 @@
       }
     }
 
-    // Auth Management
-    function setAuthTab(tab) {
-      currentAuthTab = tab;
-      document.getElementById('tab-login').classList.toggle('active', tab === 'login');
-      document.getElementById('tab-signup').classList.toggle('active', tab === 'signup');
-      document.getElementById('tab-login').style.color = tab === 'login' ? 'white' : 'var(--text-muted)';
-      document.getElementById('tab-signup').style.color = tab === 'signup' ? 'white' : 'var(--text-muted)';
-      authSubmit.innerHTML = tab === 'login' ? '<i data-lucide="log-in"></i> Login' : '<i data-lucide="user-plus"></i> Sign Up';
-      lucide.createIcons();
-    }
-
     async function checkLogin() {
       try {
         const res = await fetch('/api/me');
+        if (res.status === 401) {
+          window.location.href = '/login.html';
+          return;
+        }
         const data = await res.json();
         if (data.loggedIn) {
           isLoggedIn = true;
-          userInfo.style.display = 'flex';
-          authContainer.style.display = 'none';
           currentUsernameEl.textContent = data.username;
         } else {
-          isLoggedIn = false;
-          userInfo.style.display = 'none';
-          authContainer.style.display = 'block';
+          window.location.href = '/login.html';
         }
       } catch (e) {
         console.error("Auth check failed");
+        window.location.href = '/login.html';
       }
     }
 
-    authForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const username = document.getElementById('auth-username').value;
-      const password = document.getElementById('auth-password').value;
-      const endpoint = currentAuthTab === 'login' ? '/api/login' : '/api/signup';
-      
-      try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password })
-        });
-        const data = await res.json();
-        if (data.success) {
-          checkLogin();
-          authStatus.textContent = '';
-        } else {
-          authStatus.textContent = data.error;
-          authStatus.style.color = 'var(--danger)';
-        }
-      } catch (err) {
-        authStatus.textContent = 'Authentication failed';
-        authStatus.style.color = 'var(--danger)';
-      }
-    });
-
     async function logout() {
       await fetch('/api/logout', { method: 'POST' });
-      checkLogin();
-      setView('analyze');
+      window.location.href = '/login.html';
     }
 
     async function fetchHistory() {

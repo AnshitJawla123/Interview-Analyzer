@@ -7,10 +7,22 @@ const sqlite3 = require("sqlite3").verbose();
 const session = require("express-session");
 const bcrypt = require("bcrypt");
 const pdf = require("pdf-parse");
+const open = require("open");
 require("dotenv").config();
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+// Auth Middleware to protect routes
+const requireAuth = (req, res, next) => {
+  if (!req.session.userId) {
+    if (req.xhr || req.headers.accept.indexOf('json') > -1) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    return res.redirect('/login.html');
+  }
+  next();
+};
 
 // Database Setup
 const db = new sqlite3.Database(path.join(__dirname, "database.sqlite"), (err) => {
@@ -37,7 +49,7 @@ db.serialize(() => {
   )`);
 });
 
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname, "public"), { index: false }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(session({
@@ -46,6 +58,11 @@ app.use(session({
   saveUninitialized: false,
   cookie: { secure: false } // Set to true if using HTTPS
 }));
+
+// Route for root - check auth
+app.get("/", requireAuth, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
 
 // Auth Routes
 app.post("/api/signup", async (req, res) => {
@@ -91,8 +108,7 @@ app.post("/api/logout", (req, res) => {
 });
 
 // History Route
-app.get("/api/history", (req, res) => {
-  if (!req.session.userId) return res.status(401).json({ error: "Unauthorized" });
+app.get("/api/history", requireAuth, (req, res) => {
   db.all(`SELECT * FROM results WHERE user_id = ? ORDER BY created_at DESC`, [req.session.userId], (err, rows) => {
     if (err) return res.status(500).json({ error: "Failed to fetch history" });
     res.json(rows.map(row => ({
@@ -572,7 +588,7 @@ function generatePracticeGoals(allQuestions) {
   return goals;
 }
 
-app.post("/api/analyze", upload.fields([{ name: "video", maxCount: 1 }, { name: "resume", maxCount: 1 }]), async (req, res) => {
+app.post("/api/analyze", requireAuth, upload.fields([{ name: "video", maxCount: 1 }, { name: "resume", maxCount: 1 }]), async (req, res) => {
   try {
     console.log("Analyze request received:", req.body.roleType);
     const roleType = req.body.roleType || "";
@@ -641,17 +657,15 @@ app.post("/api/analyze", upload.fields([{ name: "video", maxCount: 1 }, { name: 
       practiceGoals
     };
 
-    // Save to DB if user is logged in
-    if (req.session.userId) {
-      console.log("Saving results to database for user:", req.session.userId);
-      db.run(`INSERT INTO results (user_id, role_type, interview_type, avg_score, overall_summary, questions_data) 
-        VALUES (?, ?, ?, ?, ?, ?)`, 
-        [req.session.userId, roleType, interviewType, avgScore, overallSummary, JSON.stringify(questionResults)],
-        (err) => {
-          if (err) console.error("Failed to save result:", err.message);
-        }
-      );
-    }
+    // Save to DB
+    console.log("Saving results to database for user:", req.session.userId);
+    db.run(`INSERT INTO results (user_id, role_type, interview_type, avg_score, overall_summary, questions_data) 
+      VALUES (?, ?, ?, ?, ?, ?)`, 
+      [req.session.userId, roleType, interviewType, avgScore, overallSummary, JSON.stringify(questionResults)],
+      (err) => {
+        if (err) console.error("Failed to save result:", err.message);
+      }
+    );
 
     res.json(result);
   } catch (error) {
@@ -660,4 +674,7 @@ app.post("/api/analyze", upload.fields([{ name: "video", maxCount: 1 }, { name: 
   }
 });
 
-app.listen(port, () => {});
+app.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}`);
+  open(`http://localhost:${port}`);
+});
